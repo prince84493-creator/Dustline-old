@@ -1,0 +1,1008 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Pistol Animation Pack – Preview</title>
+<style>
+:root{--bg:#16272f;--panel:rgba(10,20,26,.88);--ac:#e0392d;--tx:#e8eef1;--mu:#8ea3ad}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--tx);font:13px/1.3 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;overflow:hidden;touch-action:none}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+#label{position:fixed;left:14px;top:calc(env(safe-area-inset-top,0px) + 12px);pointer-events:none;text-shadow:0 2px 6px #000}
+#label b{display:block;font:italic 800 26px/1 Georgia,serif;letter-spacing:1px}
+#label span{color:var(--mu);font-size:12px}
+#panel{position:fixed;left:0;right:0;bottom:0;background:var(--panel);backdrop-filter:blur(8px);padding:8px 10px calc(env(safe-area-inset-bottom,0px) + 8px);border-top:1px solid #2c444f;max-height:46vh;overflow-y:auto}
+#chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.chip{border:1px solid #365663;background:#1c3640;color:var(--tx);padding:7px 10px;border-radius:16px;font-size:12px;cursor:pointer;user-select:none}
+.chip.on{background:var(--ac);border-color:var(--ac);font-weight:700}
+.chip.sc{border-color:#d6a93a;color:#ffd978}
+.chip.sc.on{background:#d6a93a;color:#1a1200}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.btn{border:1px solid #365663;background:#1c3640;color:var(--tx);padding:8px 12px;border-radius:10px;font-size:12px;cursor:pointer}
+.btn.on{background:#27566a;border-color:#4a8fa8}
+.btn.pri{background:var(--ac);border-color:var(--ac);font-weight:700}
+input[type=range]{accent-color:var(--ac)}
+#tl{width:100%}
+.mu{color:var(--mu);font-size:11px}
+#hint{position:fixed;right:12px;top:calc(env(safe-area-inset-top,0px) + 14px);color:var(--mu);font-size:11px;text-align:right;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="label"><b>PISTOL</b><span id="lname">—</span></div>
+<div id="hint">drag = camera ghumao<br>pinch / scroll = zoom</div>
+<div id="panel">
+  <div id="chips"></div>
+  <input id="tl" type="range" min="0" max="1000" value="0">
+  <div class="row">
+    <button class="btn pri" id="bPlay">⏸ Pause</button>
+    <button class="btn on" id="bMove">Move: ON</button>
+    <button class="btn on" id="bCam">Camera: Auto</button>
+    <button class="btn" id="bSkel">Skeleton</button>
+    <button class="btn on" id="bGun">Gun</button>
+    <button class="btn" id="bExp">⬇ Export JSON</button>
+  </div>
+  <div class="row"><span class="mu">Speed</span><input id="spd" type="range" min="10" max="200" value="100" style="width:140px"><span class="mu" id="spdv">1.0x</span><span class="mu" id="tinfo" style="margin-left:auto"></span></div>
+</div>
+
+<script>
+/* =====================================================================
+   PISTOL ANIMATION PACK  —  single file, koi external library nahi
+   ---------------------------------------------------------------------
+   PART 1  MATH
+   PART 2  SKELETON  (FK + 2-bone IK for the left/support hand)
+   PART 3  POSES + CLIPS  (video ke har move ke hisaab se)
+   PART 4  PLAYER  (blend, root motion, events, particles)
+   PART 5  RENDERER  (3D canvas preview)
+   PART 6  EXPORT  (baked quaternion JSON, Mixamo bone names)
+   PART 7  UI
+   Game me add karne ke liye: window.PistolAnim  (neeche PART 6 dekho)
+   ===================================================================== */
+(()=>{
+'use strict';
+const D=Math.PI/180;
+
+/* ============================ PART 1 : MATH ============================ */
+const add=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const mul=(a,s)=>[a[0]*s,a[1]*s,a[2]*s];
+const dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const len=a=>Math.hypot(a[0],a[1],a[2]);
+const nrm=a=>{const l=len(a)||1;return [a[0]/l,a[1]/l,a[2]/l];};
+const lerp=(a,b,t)=>a+(b-a)*t;
+const lerpV=(a,b,t)=>[lerp(a[0],b[0],t),lerp(a[1],b[1],t),lerp(a[2],b[2],t)];
+const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+const smooth=u=>{u=clamp(u,0,1);return u*u*u*(u*(u*6-15)+10);};
+const easeOut=u=>{u=clamp(u,0,1);return 1-Math.pow(1-u,3);};
+const mm=(a,b)=>{const c=new Array(9);for(let i=0;i<3;i++)for(let j=0;j<3;j++)c[i*3+j]=a[i*3]*b[j]+a[i*3+1]*b[3+j]+a[i*3+2]*b[6+j];return c;};
+const mv=(m,v)=>[m[0]*v[0]+m[1]*v[1]+m[2]*v[2],m[3]*v[0]+m[4]*v[1]+m[5]*v[2],m[6]*v[0]+m[7]*v[1]+m[8]*v[2]];
+const mT=m=>[m[0],m[3],m[6],m[1],m[4],m[7],m[2],m[5],m[8]];
+const Rx=t=>{const c=Math.cos(t),s=Math.sin(t);return [1,0,0,0,c,-s,0,s,c];};
+const Ry=t=>{const c=Math.cos(t),s=Math.sin(t);return [c,0,s,0,1,0,-s,0,c];};
+const Rz=t=>{const c=Math.cos(t),s=Math.sin(t);return [c,-s,0,s,c,0,0,0,1];};
+const I3=[1,0,0,0,1,0,0,0,1];
+function fromTo(a,b){ // shortest-arc rotation matrix a->b (unit vectors)
+  const c=dot(a,b);
+  if(c<-0.99999){let ax=Math.abs(a[0])<0.9?[1,0,0]:[0,0,1];ax=nrm(cross(a,ax));
+    return [2*ax[0]*ax[0]-1,2*ax[0]*ax[1],2*ax[0]*ax[2],2*ax[1]*ax[0],2*ax[1]*ax[1]-1,2*ax[1]*ax[2],2*ax[2]*ax[0],2*ax[2]*ax[1],2*ax[2]*ax[2]-1];}
+  const v=cross(a,b),k=1/(1+c);
+  return [1-k*(v[1]*v[1]+v[2]*v[2]),-v[2]+k*v[0]*v[1],v[1]+k*v[0]*v[2],
+          v[2]+k*v[0]*v[1],1-k*(v[0]*v[0]+v[2]*v[2]),-v[0]+k*v[1]*v[2],
+          -v[1]+k*v[0]*v[2],v[0]+k*v[1]*v[2],1-k*(v[0]*v[0]+v[1]*v[1])];
+}
+function m2q(m){ // matrix -> quaternion [x,y,z,w]
+  const t=m[0]+m[4]+m[8];let x,y,z,w;
+  if(t>0){const s=Math.sqrt(t+1)*2;w=s/4;x=(m[7]-m[5])/s;y=(m[2]-m[6])/s;z=(m[3]-m[1])/s;}
+  else if(m[0]>m[4]&&m[0]>m[8]){const s=Math.sqrt(1+m[0]-m[4]-m[8])*2;w=(m[7]-m[5])/s;x=s/4;y=(m[1]+m[3])/s;z=(m[2]+m[6])/s;}
+  else if(m[4]>m[8]){const s=Math.sqrt(1+m[4]-m[0]-m[8])*2;w=(m[2]-m[6])/s;x=(m[1]+m[3])/s;y=s/4;z=(m[5]+m[7])/s;}
+  else{const s=Math.sqrt(1+m[8]-m[0]-m[4])*2;w=(m[3]-m[1])/s;x=(m[2]+m[6])/s;y=(m[5]+m[7])/s;z=s/4;}
+  return [x,y,z,w];
+}
+
+/* ========================== PART 2 : SKELETON ========================== */
+/* Coordinates: y = up, z = character ka aage, x = character ka LEFT.
+   Angle convention (degrees) har joint ke liye [pitch, yaw, roll]:
+     pitch  +  : aage (limbs: aage swing, spine/head: aage jhukna, wrist: aage mudna)
+     yaw    +  : left ki taraf ghumna / left taraf swing
+     roll   +  : limbs ke liye bahar (abduct), spine/head ke liye left tilt
+   Knee: shin ka pitch NEGATIVE = ghutna mudna.                           */
+const BONES=['hips','spine','chest','neck','head','armR','foreR','handR','armL','foreL','handL','legL','shinL','footL','legR','shinR','footR'];
+const DEF={
+ hips :{p:null   ,o:[0,0,0]       ,ps: 1,rs:-1},
+ spine:{p:'hips' ,o:[0,.08,0]     ,ps: 1,rs:-1},
+ chest:{p:'spine',o:[0,.18,0]     ,ps: 1,rs:-1},
+ neck :{p:'chest',o:[0,.20,0]     ,ps: 1,rs:-1},
+ head :{p:'neck' ,o:[0,.09,0]     ,ps: 1,rs:-1},
+ armL :{p:'chest',o:[.19,.15,0]   ,ps:-1,rs: 1},
+ foreL:{p:'armL' ,o:[0,-.29,0]    ,ps:-1,rs: 1},
+ handL:{p:'foreL',o:[0,-.26,0]    ,ps:-1,rs: 1},
+ armR :{p:'chest',o:[-.19,.15,0]  ,ps:-1,rs:-1},
+ foreR:{p:'armR' ,o:[0,-.29,0]    ,ps:-1,rs:-1},
+ handR:{p:'foreR',o:[0,-.26,0]    ,ps:-1,rs:-1},
+ legL :{p:'hips' ,o:[.09,-.05,0]  ,ps:-1,rs: 1},
+ shinL:{p:'legL' ,o:[0,-.44,0]    ,ps:-1,rs: 1},
+ footL:{p:'shinL',o:[0,-.43,0]    ,ps:-1,rs: 1},
+ legR :{p:'hips' ,o:[-.09,-.05,0] ,ps:-1,rs:-1},
+ shinR:{p:'legR' ,o:[0,-.44,0]    ,ps:-1,rs:-1},
+ footR:{p:'shinR',o:[0,-.43,0]    ,ps:-1,rs:-1}
+};
+const L_UARM=.29,L_FARM=.26,HAND_LEN=.09;
+const MIXAMO={hips:'mixamorigHips',spine:'mixamorigSpine',chest:'mixamorigSpine2',neck:'mixamorigNeck',head:'mixamorigHead',
+ armL:'mixamorigLeftArm',foreL:'mixamorigLeftForeArm',handL:'mixamorigLeftHand',armR:'mixamorigRightArm',foreR:'mixamorigRightForeArm',handR:'mixamorigRightHand',
+ legL:'mixamorigLeftUpLeg',shinL:'mixamorigLeftLeg',footL:'mixamorigLeftFoot',legR:'mixamorigRightUpLeg',shinR:'mixamorigRightLeg',footR:'mixamorigRightFoot'};
+
+function eulerM(b,e){const d=DEF[b];return mm(Ry(e[1]*D),mm(Rx(e[0]*D*d.ps),Rz(e[2]*D*d.rs)));}
+
+/* ---- pose container ---- */
+function newPose(){
+  const j={};for(const b of BONES)j[b]=[0,0,0];
+  return {root:[0,0,0,0],            // x,y(extra),z,yaw(deg)  (y: grounding ke baad extra uthaan)
+          j,
+          lh:{gw:0,go:[0,0,0],cw:0,co:[0,0,0]},   // left-hand IK: gun-space weight/offset, chest-space weight/offset
+          fx:{flash:0,slide:0,gunMag:1,handMag:0,gunVis:1}};
+}
+function merge(p,o){
+  if(!o)return p;
+  if(o.root)for(let i=0;i<4;i++)if(o.root[i]!==undefined)p.root[i]=o.root[i];
+  if(o.j)for(const b in o.j)p.j[b]=o.j[b].slice();
+  if(o.lh)for(const k in o.lh)p.lh[k]=Array.isArray(o.lh[k])?o.lh[k].slice():o.lh[k];
+  if(o.fx)for(const k in o.fx)p.fx[k]=o.fx[k];
+  return p;
+}
+function mk(...parts){const p=newPose();for(const o of parts)merge(p,o);return p;}
+function clonePose(a){return {root:a.root.slice(),j:Object.fromEntries(BONES.map(b=>[b,a.j[b].slice()])),lh:{gw:a.lh.gw,go:a.lh.go.slice(),cw:a.lh.cw,co:a.lh.co.slice()},fx:{...a.fx}};}
+function lerpPose(a,b,t){
+  const p=newPose();
+  for(let i=0;i<4;i++)p.root[i]=lerp(a.root[i],b.root[i],t);
+  for(const k of BONES)p.j[k]=lerpV(a.j[k],b.j[k],t);
+  p.lh.gw=lerp(a.lh.gw,b.lh.gw,t);p.lh.cw=lerp(a.lh.cw,b.lh.cw,t);
+  p.lh.go=lerpV(a.lh.go,b.lh.go,t);p.lh.co=lerpV(a.lh.co,b.lh.co,t);
+  for(const k in p.fx)p.fx[k]=lerp(a.fx[k],b.fx[k],t);
+  return p;
+}
+function addJ(p,b,d){const v=p.j[b];v[0]+=d[0]||0;v[1]+=d[1]||0;v[2]+=d[2]||0;}
+
+/* ---- forward kinematics (+ left-arm IK) ---- */
+const gunToWorld=(gf,o)=>add(gf.p,add(mul(gf.s,o[0]),add(mul(gf.f,o[1]),mul(gf.u,o[2]))));
+
+function computeSkeleton(pose,opts){
+  opts=opts||{};
+  const W={};
+  const rootPos=[pose.root[0],0.98,pose.root[2]];
+  for(const b of BONES){
+    const d=DEF[b];
+    let loc=eulerM(b,pose.j[b]);
+    let pos,rot;
+    if(!d.p){
+      rot=mm(Ry(pose.root[3]*D),loc);pos=rootPos;
+    }else{
+      const pr=W[d.p];
+      if(b==='armL')ikLeft(pose,W);
+      if((b==='armL'||b==='foreL')&&W._ik)loc=W._ik[b];
+      rot=mm(pr.rot,loc);pos=add(pr.pos,mv(pr.rot,d.o));
+    }
+    W[b]={pos,rot,loc};
+    if(b==='handR'){const gp=add(pos,mv(rot,[0,-.045,0]));W.gun={p:gp,f:mv(rot,[0,-1,0]),u:mv(rot,[0,0,1]),s:mv(rot,[1,0,0])};}
+  }
+  // grounding : sabse neeche ka foot point zameen par
+  let dy=0;
+  if(!opts.noGround){
+    let low=1e9;
+    for(const s of ['L','R']){
+      const f=W['foot'+s];
+      low=Math.min(low,add(f.pos,mv(f.rot,[0,-.07,-.05]))[1],add(f.pos,mv(f.rot,[0,-.07,.15]))[1]);
+    }
+    dy=-low;
+  }
+  dy+=pose.root[1];
+  for(const b of BONES)W[b].pos[1]+=dy;
+  W.gun.p[1]+=dy;
+  W.dy=dy;
+  return W;
+}
+function ikLeft(pose,W){
+  W._ik=null;
+  const lh=pose.lh;let gw=lh.gw,cw=lh.cw;const tot=gw+cw;
+  if(tot<0.002)return;
+  if(tot>1){gw/=tot;cw/=tot;}
+  const ch=W.chest;
+  const S=add(ch.pos,mv(ch.rot,DEF.armL.o));
+  // FK reference chain (taaki w=0 par koi pop na ho)
+  const uaFk=mm(ch.rot,eulerM('armL',pose.j.armL));
+  const Efk=add(S,mv(uaFk,[0,-L_UARM,0]));
+  const faFk=mm(uaFk,eulerM('foreL',pose.j.foreL));
+  const Pfk=add(Efk,mv(faFk,[0,-L_FARM,0]));
+  // IK targets
+  const gunGf=W.gun;
+  const Tg=gunToWorld(gunGf,lh.go);
+  const Tc=add(ch.pos,mv(ch.rot,lh.co));
+  const T=add(Pfk,add(mul(sub(Tg,Pfk),gw),mul(sub(Tc,Pfk),cw)));
+  const w=Math.min(1,gw+cw);
+  const poleDef=mv(ch.rot,nrm([.75,-.85,-.15]));
+  const poleFk=nrm(sub(Efk,S));
+  const pole=nrm(lerpV(poleFk,poleDef,w));
+  // 2-bone solve
+  const dv=sub(T,S);const dist=len(dv)||1e-6;
+  const mx=L_UARM+L_FARM-1e-4,mn=Math.abs(L_UARM-L_FARM)+1e-4;
+  const dc=clamp(dist,mn,mx);const u=mul(dv,1/dist);
+  const a=(L_UARM*L_UARM-L_FARM*L_FARM+dc*dc)/(2*dc);
+  const h=Math.sqrt(Math.max(0,L_UARM*L_UARM-a*a));
+  let pd=sub(pole,mul(u,dot(pole,u)));if(len(pd)<1e-5)pd=cross(u,[0,1,0]);pd=nrm(pd);
+  const E=add(S,add(mul(u,a),mul(pd,h)));
+  const Wr=add(S,mul(u,dc));
+  const d1=mv(mT(ch.rot),nrm(sub(E,S)));
+  const Mua=fromTo([0,-1,0],d1);
+  const uaRot=mm(ch.rot,Mua);
+  const d2=mv(mT(uaRot),nrm(sub(Wr,E)));
+  const Mfa=fromTo([0,-1,0],d2);
+  W._ik={armL:Mua,foreL:Mfa};
+}
+
+/* ========================= PART 3 : POSES + CLIPS ========================= */
+/* ---- base stand ---- */
+const STAND={j:{armL:[0,0,6],armR:[0,0,6],legL:[0,0,3],legR:[0,0,3],head:[0,0,0]}};
+const st=(...o)=>mk(STAND,...o);
+
+/* --- gun carries (right hand pistol) --- */
+// LOW2 : dono haath se pistol pet ke paas, nali aage-neeche (video ka idle)
+const LOW2={j:{armR:[28,16,0],foreR:[48,0,0],handR:[-12,0,0],spine:[3,0,0],head:[-3,0,0]},lh:{gw:1,go:[.05,-.04,-.085]}};
+// CARRY1 : chalte waqt ek haath me pistol, kohni mudi hui
+const CARRY1={j:{armR:[16,6,10],foreR:[58,0,0],handR:[-8,0,0]}};
+// AIM1 : ek haath se seedha aim (body bladed, right shoulder aage)
+const AIM1={root:[0,0,0,0],j:{hips:[0,22,0],spine:[2,14,0],chest:[0,6,0],head:[0,-26,0],
+  armR:[88,-40,4],foreR:[4,0,0],handR:[0,0,0],legR:[12,0,6],legL:[-8,0,10],shinR:[-12,0,0],shinL:[-14,0,0],footR:[0,0,0],footL:[0,0,0]},
+  lh:{cw:1,co:[.09,-.20,.13]}};
+// AIM2 : dono haath, aankh ki line me
+const AIM2={j:{hips:[0,8,0],spine:[2,4,0],head:[3,-10,0],armR:[84,-10,6],foreR:[8,0,0],handR:[0,0,0],legR:[8,0,5],legL:[-6,0,6],shinR:[-8,0,0],shinL:[-10,0,0]},
+  lh:{gw:1,go:[.05,-.04,-.085]}};
+// HIGH : pistol chehre ke paas, nali upar (SUL / high-ready)
+const HIGH={j:{spine:[4,6,0],head:[0,-8,0],armR:[62,-4,16],foreR:[104,0,0],handR:[-18,0,0],legR:[6,0,4],legL:[-6,0,4],shinR:[-6,0,0],shinL:[-8,0,0]},
+  lh:{gw:1,go:[.05,-.04,-.085]}};
+// LOWER : haath dhile, pistol side me latka
+const LOWER={j:{armR:[4,0,8],foreR:[12,0,0],handR:[38,0,0],armL:[0,0,8],foreL:[6,0,0]}};
+
+/* --- crouch --- */
+const CROUCH_LEGS={root:[0,0,-.20,0],j:{hips:[6,0,0],spine:[22,0,0],chest:[10,0,0],neck:[0,0,0],head:[-26,0,0],
+  legL:[70,0,6],legR:[70,0,6],shinL:[-110,0,0],shinR:[-110,0,0],footL:[40,0,0],footR:[40,0,0]}};
+const CROUCH_LOW={j:{armR:[40,14,0],foreR:[40,0,0],handR:[-10,0,0]},lh:{gw:1,go:[.05,-.04,-.085]}};
+
+/* ---- yardstick helpers ---- */
+// keyframe track: keys=[[t,pose,easeName?],...]
+function track(keys){
+  return t=>{
+    if(t<=keys[0][0])return clonePose(keys[0][1]);
+    for(let i=1;i<keys.length;i++){
+      if(t<=keys[i][0]){
+        const a=keys[i-1],b=keys[i];
+        let u=(t-a[0])/Math.max(1e-6,b[0]-a[0]);
+        const e=b[2]||'s';
+        u=e==='o'?easeOut(u):e==='l'?clamp(u,0,1):e==='k'?(u<1?0:1):smooth(u);
+        return lerpPose(a[1],b[1],u);
+      }
+    }
+    return clonePose(keys[keys.length-1][1]);
+  };
+}
+const sinT=(t,per,ph)=>Math.sin(2*Math.PI*(t/per)+(ph||0));
+
+/* ---- IDLE (video: dono haath pet ke paas pistol, halka saans, idhar-udhar dekhna) ---- */
+function idleFn(t){
+  const p=st(LOW2);
+  const b=sinT(t,4);
+  addJ(p,'chest',[1.3*b,0,0]);addJ(p,'spine',[.8*b,0,0]);
+  addJ(p,'head',[1.5*sinT(t,4,1),14*sinT(t,9)+4*sinT(t,5),0]);
+  addJ(p,'hips',[0,2*sinT(t,7),1.2*sinT(t,6)]);
+  addJ(p,'armR',[.8*b,0,0]);
+  p.root[0]=.012*sinT(t,6);
+  return p;
+}
+
+/* ---- WALK (ek haath me pistol low, doosra haath jhoolta) ---- */
+function walkFn(t,speedScale){
+  const per=1.05,th=2*Math.PI*(t/per);
+  const p=st(CARRY1);
+  legPair(p,th,26,40);
+  const s=Math.sin(th),c=Math.cos(th);
+  addJ(p,'hips',[2,-5*s,0]);addJ(p,'spine',[3,7*s,0]);addJ(p,'chest',[0,3*s,1.5*c]);
+  addJ(p,'head',[-2,-6*s,0]);
+  // left arm opposite swing
+  p.j.armL=[-17*s+3,0,6];p.j.foreL=[18+8*(1+s)/2,0,0];
+  // right arm (gun) halka bounce
+  addJ(p,'armR',[2*s,0,0]);addJ(p,'foreR',[3*Math.abs(c),0,0]);
+  p.root[0]=.02*c;
+  return p;
+}
+function legPair(p,th,A,K){
+  for(const side of ['L','R']){
+    const ph=th+(side==='R'?Math.PI:0);
+    const s=Math.sin(ph),c=Math.cos(ph);
+    const a=A*s;
+    const b=-(5+K*Math.pow(Math.max(0,Math.cos(ph+.6)),1.4));
+    const extra=9*Math.pow(Math.max(0,s),2)-28*Math.pow(Math.max(0,-s),1.5);
+    p.j['leg'+side]=[a,0,3];p.j['shin'+side]=[b,0,0];p.j['foot'+side]=[-(a+b)+extra,0,0];
+  }
+}
+/* ---- RUN ---- */
+function runFn(t){
+  const per=.70,th=2*Math.PI*(t/per);
+  const p=st();
+  legPair(p,th,44,78);
+  const s=Math.sin(th),c=Math.cos(th);
+  addJ(p,'hips',[8,-8*s,0]);addJ(p,'spine',[7,12*s,0]);addJ(p,'chest',[2,5*s,2*c]);addJ(p,'head',[-8,-8*s,0]);
+  // gun arm: kohni 90, halka pump
+  p.j.armR=[20+14*s,6,8];p.j.foreR=[82,0,0];p.j.handR=[-6,0,0];
+  p.j.armL=[-40*s+8,0,8];p.j.foreL=[88,0,0];
+  p.root[1]=.055*(.5+.5*Math.cos(2*th+.4));
+  p.root[0]=.02*c;
+  return p;
+}
+/* ---- TURN (jagah par 90 degree) ---- */
+function turnFn(dir){return t=>{
+  const p=st(LOW2);
+  const u=smooth(t/1.2);
+  const sh=Math.sin(2*Math.PI*t/.8);
+  p.j.legL=[10*sh*(1)+0,0,3];p.j.legR=[-10*sh,0,3];
+  p.j.shinL=[-(6+10*Math.max(0,sh)),0,0];p.j.shinR=[-(6+10*Math.max(0,-sh)),0,0];
+  p.j.footL=[-(p.j.legL[0]+p.j.shinL[0]),0,0];p.j.footR=[-(p.j.legR[0]+p.j.shinR[0]),0,0];
+  addJ(p,'spine',[0,dir*14*Math.sin(Math.PI*clamp(t/1.2,0,1)),0]);
+  addJ(p,'head',[0,dir*22*Math.sin(Math.PI*clamp(t/1.2,0,1)),0]);
+  return p;};}
+
+/* ---- READY : pistol seene tak, dono haath (video ~40-60s) ---- */
+const READY_CHEST={j:{armR:[44,24,0],foreR:[86,0,0],handR:[-28,0,0],spine:[4,0,0],head:[2,0,0]},lh:{gw:1,go:[.05,-.04,-.085]}};
+const readyFn=track([
+  [0,st(LOW2)],
+  [.7,st(READY_CHEST)],
+  [2.6,st(READY_CHEST,{j:{head:[3,-6,0]}})],
+  [3.4,st(LOW2)],
+  [4.0,st(LOW2)]
+]);
+
+/* ---- fire events helper ---- */
+const FIRE=(base,t0)=>{ // fx kick at time t0
+  return null;};
+
+/* ---- AIM 1-hand : uthao, 3 baar fire, wapas ---- */
+function mkAim1(){
+  const A=st(AIM1);
+  const kick=(dh)=>mk(AIM1,{j:{armR:[88+dh,-40,4],handR:[dh*.6,0,0],spine:[2-dh*.12,14,0],head:[0,-26,0]},fx:{flash:0,slide:0}});
+  const K=[[0,st(LOW2)],
+    [.35,st(CARRY1,{lh:{cw:1,co:[.09,-.20,.13]},j:{armR:[40,-10,6],foreR:[70,0,0]}}),'s'],
+    [.95,A,'s'],
+    [1.30,A,'s']];
+  // 3 shots: 1.4, 2.4, 3.4 ; recoil
+  let t=1.4;
+  for(let i=0;i<3;i++){
+    const k=kick(10+i*2);
+    K.push([t,mk(AIM1,{fx:{flash:1,slide:1}}),'k']);
+    K.push([t+.06,mk(k,{fx:{flash:0,slide:1}}),'o']);
+    K.push([t+.18,mk(k,{fx:{flash:0,slide:0}}),'s']);
+    K.push([t+.60,A,'s']);
+    t+=1.0;
+  }
+  K.push([4.9,A,'s']);
+  K.push([5.7,st(LOW2),'s']);
+  K.push([6.2,st(LOW2),'s']);
+  return track(K);
+}
+const aim1Fn=mkAim1();
+
+function mkAim2(){
+  const A=st(AIM2);
+  const K=[[0,st(LOW2)],[.4,st(READY_CHEST)],[.9,A],[1.2,A]];
+  let t=1.3;
+  for(let i=0;i<3;i++){
+    const kick=mk(AIM2,{j:{armR:[84+11,-10,6],foreR:[8,0,0],handR:[8,0,0],spine:[0,4,0],head:[2,-10,0]},fx:{slide:1}});
+    K.push([t,mk(AIM2,{fx:{flash:1,slide:1}}),'k']);
+    K.push([t+.06,kick,'o']);
+    K.push([t+.18,mk(kick,{fx:{slide:0}}),'s']);
+    K.push([t+.55,A,'s']);
+    t+=.95;
+  }
+  K.push([4.6,A,'s']);K.push([5.3,st(LOW2),'s']);K.push([5.8,st(LOW2),'s']);
+  return track(K);
+}
+const aim2Fn=mkAim2();
+
+const highFn=track([
+  [0,st(LOW2)],[.5,st(READY_CHEST)],[1.1,st(HIGH)],[3.0,st(HIGH,{j:{head:[0,-14,0],spine:[4,-8,0]}})],[3.5,st(HIGH,{j:{head:[0,8,0],spine:[4,4,0]}})],
+  [4.3,st(READY_CHEST)],[5.0,st(LOW2)],[5.4,st(LOW2)]
+]);
+
+/* ---- LOWER / LOOK (haath dhile, pistol latka, aas-paas dekhna, halka mudna) ---- */
+const lowerFn=track([
+  [0,st(LOW2)],
+  [.8,st(LOWER)],
+  [1.8,st(LOWER,{j:{head:[0,34,0],spine:[0,10,0],hips:[0,6,0]}})],
+  [3.2,st(LOWER,{j:{head:[0,-34,0],spine:[0,-12,0],hips:[0,-6,0]}})],
+  [4.2,st(LOWER,{j:{head:[-4,0,0]}})],
+  [5.0,st(LOW2)],[5.4,st(LOW2)]
+]);
+
+/* ---- COMMS : left hand kaan/jabde ke paas (radio), phir wapas ---- */
+const commsFn=track([
+  [0,st(LOW2)],
+  [.5,st(CARRY1)],
+  [1.1,st(CARRY1,{lh:{cw:1,co:[.12,.33,.12]},j:{head:[0,-6,0]}})],
+  [2.4,st(CARRY1,{lh:{cw:1,co:[.12,.33,.12]},j:{head:[0,-6,0]}})],
+  [3.0,st(LOW2)],[3.3,st(LOW2)]
+]);
+
+/* ---- RELOAD (standing) ---- */
+function mkReload(base){
+  // base() -> body pose dict (legs/torso), arms below added over it
+  const B=(...o)=>mk(base,...o);
+  const GUNUP=READY_CHEST;
+  const keys=[
+    [0,B(LOW2)],
+    [.6,B(GUNUP)],
+    [1.0,B(GUNUP,{lh:{go:[.0,-.02,-.16]}})],                       // haath mag ke neeche
+    [1.18,B(GUNUP,{lh:{go:[.0,-.02,-.16]},fx:{gunMag:0}}),'k'],    // mag nikla (event: dropmag)
+    [1.7,B(GUNUP,{lh:{gw:0,go:[.0,-.02,-.16],cw:1,co:[.16,-.44,.06]},fx:{gunMag:0}})], // belt pouch
+    [1.95,B(GUNUP,{lh:{gw:0,go:[.0,-.02,-.16],cw:1,co:[.16,-.44,.06]},fx:{gunMag:0,handMag:1}}),'k'],
+    [2.6,B(GUNUP,{lh:{gw:1,go:[.0,-.02,-.17],cw:0,co:[.16,-.44,.06]},fx:{gunMag:0,handMag:1}})],
+    [3.0,B(GUNUP,{lh:{gw:1,go:[.0,-.02,-.11],cw:0},fx:{gunMag:0,handMag:1}})],  // andar dabaya
+    [3.12,B(GUNUP,{lh:{gw:1,go:[.0,-.02,-.11],cw:0},fx:{gunMag:1,handMag:0}}),'k'],
+    [3.5,B(GUNUP,{lh:{gw:1,go:[.03,.08,.015]},fx:{gunMag:1}})],                  // slide pakda
+    [3.8,B(GUNUP,{lh:{gw:1,go:[.03,.00,.015]},fx:{slide:1}}),'o'],               // slide khinchi
+    [4.0,B(GUNUP,{lh:{gw:1,go:[.03,.08,.015]},fx:{slide:0}}),'o'],               // chhodi
+    [4.5,B(LOW2)],
+    [4.9,B(LOW2)]
+  ];
+  return track(keys);
+}
+const reloadFn=mkReload(st());
+const crouchBase=st(CROUCH_LEGS);
+
+/* ---- CROUCH ---- */
+const crouchDownFn=track([[0,st(LOW2)],[.9,mk(crouchBase,CROUCH_LOW)],[1.3,mk(crouchBase,CROUCH_LOW)]]);
+function crouchIdleFn(t){
+  const p=mk(crouchBase,CROUCH_LOW);
+  const b=sinT(t,3.6);
+  addJ(p,'chest',[2*b,0,0]);addJ(p,'spine',[1.5*b,0,0]);
+  addJ(p,'head',[3*sinT(t,5),22*sinT(t,8)+5*sinT(t,4.3),0]);
+  addJ(p,'hips',[0,2*sinT(t,6),0]);
+  return p;
+}
+function crouchWalkFn(t){
+  const per=1.25,th=2*Math.PI*t/per;
+  const p=mk(crouchBase,CROUCH_LOW);
+  const s=Math.sin(th),c=Math.cos(th);
+  for(const side of ['L','R']){
+    const ph=th+(side==='R'?Math.PI:0),ss=Math.sin(ph);
+    const a=70+16*ss;
+    const b=-110-(18*Math.max(0,Math.cos(ph+.4)))+8*ss;
+    p.j['leg'+side]=[a,0,6];p.j['shin'+side]=[b,0,0];p.j['foot'+side]=[-(a+b)+4*Math.max(0,ss)-10*Math.max(0,-ss),0,0];
+  }
+  addJ(p,'hips',[0,-4*s,0]);addJ(p,'spine',[0,6*s,0]);addJ(p,'head',[0,-6*s,0]);
+  p.root[1]=.015*Math.abs(c);
+  return p;
+}
+const crouchReloadFn=mkReload(mk(crouchBase));
+const standUpFn=track([[0,mk(crouchBase,CROUCH_LOW)],[1.1,st(LOW2)],[1.4,st(LOW2)]]);
+
+/* ---- CLIP REGISTRY ---- */
+const CLIPS={};
+function reg(id,label,dur,loop,fn,extra){CLIPS[id]=Object.assign({id,label,dur,loop,fn,v:0,w:0,events:[]},extra||{});}
+reg('idle','Idle (low ready)',8,true,idleFn);
+reg('walk','Walk (gun low)',1.05,true,walkFn,{v:1.35});
+reg('run','Run',.70,true,runFn,{v:3.6});
+reg('turnL','Turn 90° Left',1.2,false,turnFn(1),{turn:Math.PI/2});
+reg('turnR','Turn 90° Right',1.2,false,turnFn(-1),{turn:-Math.PI/2});
+reg('ready','Gun to chest (ready)',4,false,readyFn);
+reg('aim1','Aim 1-hand + Fire x3',6.2,false,aim1Fn,{events:[[1.4,'shell'],[2.4,'shell'],[3.4,'shell']]});
+reg('aim2','Aim 2-hand + Fire x3',5.8,false,aim2Fn,{events:[[1.3,'shell'],[2.25,'shell'],[3.2,'shell']]});
+reg('high','High ready (gun face ke paas)',5.4,false,highFn);
+reg('lower','Lower + Look around',5.4,false,lowerFn);
+reg('comms','Hand to ear (radio)',3.3,false,commsFn);
+reg('reload','Reload (standing)',4.9,false,reloadFn,{events:[[1.18,'dropmag']]});
+reg('cdown','Crouch down',1.3,false,crouchDownFn);
+reg('cidle','Crouch idle',8,true,crouchIdleFn);
+reg('cwalk','Crouch walk',1.25,true,crouchWalkFn,{v:.75});
+reg('creload','Reload (crouch)',4.9,false,crouchReloadFn,{events:[[1.18,'dropmag']]});
+reg('stand','Stand up',1.4,false,standUpFn);
+
+/* ---- SHOWCASE : video ke order me poora sequence ---- */
+const SHOW=[
+ ['idle',3.5],['walk',4.5,{w:.38}],['walk',3.0,{w:-.55}],['run',3.0,{w:.45}],['walk',2.0,{w:0}],['idle',1.5],
+ ['ready'],['aim1'],['aim2'],['high'],['lower'],['reload'],['comms'],
+ ['cdown'],['cidle',3.0],['cwalk',4.0,{w:.5}],['creload'],['stand'],['idle',2.0]
+];
+
+/* ========================= PART 4 : PLAYER ========================= */
+const S={
+  clip:'idle',t:0,playing:true,speed:1,move:true,showcase:true,showIdx:0,showT:0,
+  pos:[0,0],yaw:0,prev:null,blend:1,blendDur:.28,lastPose:null,evPrev:0,w:0,
+  gunOn:true,skel:false
+};
+const parts=[]; // particles (shell, mag)
+function spawn(type,W,pose){
+  const gf=W.gun;
+  if(type==='shell'){
+    const o=gunToWorld(gf,[0,.05,.03]);
+    const v=add(add(mul(gf.s,-1.1-Math.random()*.5),mul(gf.u,1.4+Math.random()*.6)),mul(gf.f,-.2));
+    parts.push({type:'shell',p:o,v,rot:Math.random()*6,age:0,life:2.2});
+  }else if(type==='dropmag'){
+    const o=gunToWorld(gf,[0,-.015,-.12]);
+    parts.push({type:'mag',p:o,v:[0,-.2,0],rot:0,age:0,life:2.5,gf:{f:gf.f,u:gf.u,s:gf.s}});
+  }
+}
+let lastW=null;
+function clipPoseAt(id,t){return CLIPS[id].fn(t);}
+
+function setClip(id,fromShowcase){
+  if(!fromShowcase)S.showcase=false;
+  if(S.lastPose&&S.clip!==undefined){S.prev=clonePose(S.lastPose);S.blend=0;}
+  S.clip=id;S.t=0;S.evPrev=-1;
+  document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('on',c.dataset.id===id&&!S.showcase||(c.dataset.id==='_show'&&S.showcase)));
+  document.getElementById('lname').textContent=CLIPS[id].label;
+}
+function startShowcase(){
+  S.showcase=true;S.showIdx=0;S.showT=0;S.pos=[0,0];S.yaw=0;
+  applyShowEntry();
+}
+function applyShowEntry(){
+  const e=SHOW[S.showIdx];const c=CLIPS[e[0]];
+  S.w=(e[2]&&e[2].w!==undefined)?e[2].w:0;
+  S.showDur=e[1]||c.dur;
+  setClip(e[0],true);
+  document.querySelectorAll('.chip').forEach(c=>c.classList.toggle('on',c.dataset.id==='_show'));
+}
+function update(dt){
+  if(!S.playing){return;}
+  const c=CLIPS[S.clip];
+  const sdt=dt*S.speed;
+  const t0=S.t;
+  S.t+=sdt;
+  // events
+  for(const ev of c.events){if(ev[0]>t0&&ev[0]<=S.t&&lastW)spawn(ev[1],lastW);}
+  let ended=false;
+  if(c.loop){if(S.t>=c.dur)S.t-=c.dur;}
+  else if(S.t>=c.dur){S.t=c.dur;ended=true;}
+  S.blend=Math.min(1,S.blend+dt/S.blendDur);
+  // root motion
+  if(S.move){
+    const v=c.v||0;
+    let w=S.showcase?S.w:0;
+    if(c.turn){const u0=smooth(t0/c.dur),u1=smooth(S.t/c.dur);S.yaw+=c.turn*(u1-u0);}
+    S.yaw+=w*sdt*(v>0?1:0);
+    S.pos[0]+=Math.sin(S.yaw)*v*sdt;S.pos[1]+=Math.cos(S.yaw)*v*sdt;
+  }
+  // showcase advance
+  if(S.showcase){
+    S.showT+=sdt;
+    const e=SHOW[S.showIdx];
+    const lim=e[1]||c.dur;
+    if(S.showT>=lim||(ended&&!e[1])){
+      S.showIdx=(S.showIdx+1)%SHOW.length;S.showT=0;
+      if(S.showIdx===0){S.pos=[0,0];S.yaw=0;}
+      applyShowEntry();
+    }
+  }
+  particleStep(sdt);
+}
+function particleStep(dt){
+  for(const p of parts){
+    p.age+=dt;p.v[1]-=9.8*dt;p.p=add(p.p,mul(p.v,dt));
+    if(p.p[1]<(p.type==='mag'?.02:.008)){p.p[1]=(p.type==='mag'?.02:.008);p.v[1]*=-.3;p.v[0]*=.6;p.v[2]*=.6;if(Math.abs(p.v[1])<.3)p.v[1]=0;}
+    p.rot+=dt*8;
+  }
+  for(let i=parts.length-1;i>=0;i--)if(parts[i].age>parts[i].life)parts.splice(i,1);
+}
+function currentPose(){
+  const c=CLIPS[S.clip];
+  let p=c.fn(S.t);
+  if(S.blend<1&&S.prev)p=lerpPose(S.prev,p,smooth(S.blend));
+  S.lastPose=clonePose(p);
+  return p;
+}
+
+/* ========================= PART 5 : RENDERER ========================= */
+const cv=document.getElementById('c'),cx=cv.getContext('2d');
+let VW=0,VH=0,DPR=1;
+function resize(){DPR=Math.min(2.5,window.devicePixelRatio||1);VW=innerWidth;VH=innerHeight;cv.width=VW*DPR;cv.height=VH*DPR;}
+addEventListener('resize',resize);resize();
+
+const cam={yaw:.55,pitch:.16,dist:4.3,auto:true,tgt:[0,.95,0],fov:48};
+let FOC=600,CP=[0,0,0],CR=[1,0,0],CU=[0,1,0],CF=[0,0,1];
+function camSetup(){
+  const cpv=Math.cos(cam.pitch);
+  const off=[Math.sin(cam.yaw)*cpv*cam.dist,Math.sin(cam.pitch)*cam.dist,Math.cos(cam.yaw)*cpv*cam.dist];
+  CP=add(cam.tgt,off);
+  CF=nrm(sub(cam.tgt,CP));
+  CR=nrm(cross(CF,[0,1,0]));
+  CU=cross(CR,CF);
+  FOC=(Math.min(VW,VH*.75)*.5)/Math.tan(cam.fov*D/2)*1.0;
+}
+function proj(p){
+  const d=sub(p,CP);const z=dot(d,CF);
+  if(z<.15)return null;
+  const k=FOC/z;
+  return [VW/2+dot(d,CR)*k,VH*.40-dot(d,CU)*k,z,k];
+}
+const LDIR=nrm([.45,.85,.35]);
+function shade(col,f){return `rgb(${clamp(col[0]*f|0,0,255)},${clamp(col[1]*f|0,0,255)},${clamp(col[2]*f|0,0,255)})`;}
+const COL={gray:[132,124,118],dark:[48,48,54],red:[212,40,30],helm:[34,34,40],tan:[196,170,120],gold:[205,172,88],black:[26,26,30],mid:[96,92,92]};
+
+let prims=[];
+function pushCap(A,B,rA,rB,col,o){
+  const pa=proj(A),pb=proj(B);if(!pa||!pb)return;
+  prims.push({z:(pa[2]+pb[2])/2,k:'cap',pa,pb,ra:rA*pa[3],rb:rB*pb[3],col,A,B,o:o||{}});
+}
+function drawCap(P){
+  const {pa,pb,ra,rb,col}=P;
+  const dx=pb[0]-pa[0],dy=pb[1]-pa[1],L=Math.hypot(dx,dy);
+  // light direction in 3D axis dot
+  const ax=nrm(sub(P.B,P.A));const lit=.55+.5*Math.max(0,dot(ax,LDIR)*0.5+0.5)*0.0+.0;
+  let nx=0,ny=1;if(L>.5){nx=-dy/L;ny=dx/L;}
+  // screen light direction (projected): light from upper-right
+  const sl=[.5,-.85];const side=(nx*sl[0]+ny*sl[1])>=0?1:-1;
+  const ex=nx*side,ey=ny*side;
+  const mid=[(pa[0]+pb[0])/2,(pa[1]+pb[1])/2],rm=(ra+rb)/2;
+  const g=cx.createLinearGradient(mid[0]-ex*rm,mid[1]-ey*rm,mid[0]+ex*rm,mid[1]+ey*rm);
+  const base=P.o.shade!==undefined?P.o.shade:1;
+  g.addColorStop(0,shade(col,1.35*base));g.addColorStop(.45,shade(col,.95*base));g.addColorStop(1,shade(col,.42*base));
+  cx.fillStyle=g;
+  cx.beginPath();
+  if(L>.5){
+    cx.moveTo(pa[0]+nx*ra,pa[1]+ny*ra);cx.lineTo(pb[0]+nx*rb,pb[1]+ny*rb);
+    cx.lineTo(pb[0]-nx*rb,pb[1]-ny*rb);cx.lineTo(pa[0]-nx*ra,pa[1]-ny*ra);cx.closePath();
+  }
+  cx.fill();
+  for(const q of [[pa,ra],[pb,rb]]){
+    const rg=cx.createRadialGradient(q[0][0]+ex*-q[1]*.35,q[0][1]+ey*-q[1]*.35,q[1]*.1,q[0][0],q[0][1],q[1]);
+    rg.addColorStop(0,shade(col,1.3*base));rg.addColorStop(1,shade(col,.55*base));
+    cx.fillStyle=rg;cx.beginPath();cx.arc(q[0][0],q[0][1],Math.max(.5,q[1]),0,7);cx.fill();
+  }
+}
+// oriented tapered box (frustum) : p0 -> p1 along rot's Y axis
+function pushFrustum(p0,rot,h,w0,d0,w1,d1,col,o){
+  const cs=[];
+  const mkc=(y,w,d)=>[[-w,y,-d],[w,y,-d],[w,y,d],[-w,y,d]].map(q=>add(p0,mv(rot,q)));
+  const b=mkc(0,w0,d0),t=mkc(h,w1,d1);
+  const pts=b.concat(t);
+  const pr=pts.map(proj);if(pr.some(q=>!q))return;
+  const faces=[[0,1,2,3],[4,5,6,7],[0,1,5,4],[1,2,6,5],[2,3,7,6],[3,0,4,7]];
+  const center=add(p0,mv(rot,[0,h/2,0]));
+  const pc=proj(center);if(!pc)return;
+  prims.push({z:pc[2],k:'fr',pts,pr,faces,col,rot,o:o||{}});
+}
+function drawFrustum(P){
+  const cl=[];
+  for(const f of P.faces){
+    const a=P.pts[f[0]],b=P.pts[f[1]],c=P.pts[f[2]];
+    let n=nrm(cross(sub(b,a),sub(c,a)));
+    const cen=[0,1,2,3].reduce((s,i)=>add(s,P.pts[f[i]]),[0,0,0]).map(v=>v/4);
+    // orient outward from centre of frustum
+    const mid=[0,1,2,3,4,5,6,7].reduce((s,i)=>add(s,P.pts[i]),[0,0,0]).map(v=>v/8);
+    if(dot(n,sub(cen,mid))<0)n=mul(n,-1);
+    const vis=dot(n,sub(CP,cen));
+    if(vis<=0)continue;
+    cl.push({f,n,z:proj(cen)[2],l:.5+.6*Math.max(0,dot(n,LDIR))});
+  }
+  cl.sort((a,b)=>b.z-a.z);
+  for(const c of cl){
+    cx.fillStyle=shade(P.col,c.l*(P.o.shade||1));cx.strokeStyle=shade(P.col,.35);cx.lineWidth=1;
+    cx.beginPath();c.f.forEach((i,ix)=>{const q=P.pr[i];ix?cx.lineTo(q[0],q[1]):cx.moveTo(q[0],q[1]);});cx.closePath();cx.fill();cx.stroke();
+  }
+}
+// oriented box centered
+function pushBox(c,ax,hs,col,o){ // ax: [s,f,u] unit vectors; hs: half sizes [s,f,u]
+  const pts=[];
+  for(const sx of[-1,1])for(const sy of[-1,1])for(const sz of[-1,1])
+    pts.push(add(c,add(mul(ax[0],hs[0]*sx),add(mul(ax[1],hs[1]*sy),mul(ax[2],hs[2]*sz)))));
+  const pr=pts.map(proj);if(pr.some(q=>!q))return;
+  const pc=proj(c);
+  // index = sx*4+sy*2+sz (with -1->0)
+  const faces=[[0,1,3,2],[4,5,7,6],[0,1,5,4],[2,3,7,6],[0,2,6,4],[1,3,7,5]];
+  prims.push({z:pc[2]-.002,k:'fr',pts,pr,faces,col,rot:null,o:o||{},cen:c});
+}
+function pushSphereDisc(c,r,col,o){const p=proj(c);if(!p)return;prims.push({z:p[2],k:'disc',p,r:r*p[3],col,o:o||{}});}
+function drawDisc(P){
+  const g=cx.createRadialGradient(P.p[0]-P.r*.3,P.p[1]-P.r*.3,P.r*.1,P.p[0],P.p[1],P.r);
+  g.addColorStop(0,shade(P.col,1.3));g.addColorStop(1,shade(P.col,.5));
+  cx.fillStyle=g;cx.beginPath();cx.arc(P.p[0],P.p[1],P.r,0,7);cx.fill();
+}
+
+function buildBody(W,pose){
+  const B=n=>W[n];
+  const lg=(b,off)=>add(B(b).pos,mv(B(b).rot,off));
+  const hips=B('hips'),sp=B('spine'),ch=B('chest'),nk=B('neck'),hd=B('head');
+  // pelvis
+  pushFrustum(add(hips.pos,mv(hips.rot,[0,-.13,0])),hips.rot,.21,.165,.115,.175,.12,COL.mid);
+  // abdomen
+  pushFrustum(add(sp.pos,mv(sp.rot,[0,-.03,0])),sp.rot,.24,.140,.100,.155,.108,COL.dark);
+  // chest
+  pushFrustum(add(ch.pos,mv(ch.rot,[0,-.04,0])),ch.rot,.32,.170,.112,.225,.115,COL.gray);
+  // chest red band (front)
+  pushCap(add(ch.pos,mv(ch.rot,[0,.00,.113])),add(ch.pos,mv(ch.rot,[0,.20,.116])),.018,.016,COL.red,{shade:1});
+  // neck
+  pushCap(nk.pos,add(nk.pos,mv(nk.rot,[0,.10,0])),.042,.038,COL.dark);
+  // head (helmet)
+  const hc=add(hd.pos,mv(hd.rot,[0,.115,0.005]));
+  pushCap(add(hd.pos,mv(hd.rot,[0,.07,0])),add(hd.pos,mv(hd.rot,[0,.16,0])),.098,.094,COL.helm);
+  for(const sd of[-1,1])pushSphereDisc(add(hc,mv(hd.rot,[sd*.098,0,-.005])),.042,COL.tan,{});
+  prims.push({z:proj(hc)[2]-.12,k:'helm',hd,hc});
+  // shoulders & arms
+  for(const s of['L','R']){
+    const a=B('arm'+s),f=B('fore'+s),h=B('hand'+s);
+    pushSphereDisc(a.pos,.080,COL.gray);
+    const E=f.pos,Wr=h.pos;
+    pushCap(a.pos,E,.066,.055,COL.gray);
+    pushCap(E,Wr,.054,.042,COL.mid);
+    const hEnd=add(Wr,mv(h.rot,[0,-HAND_LEN,0]));
+    pushCap(Wr,hEnd,.042,.036,COL.dark);
+    // thigh etc
+  }
+  for(const s of['L','R']){
+    const l=B('leg'+s),sh=B('shin'+s),ft=B('foot'+s);
+    pushCap(l.pos,sh.pos,.098,.072,COL.gray);
+    // red thigh stripe (front)
+    const o1=mv(l.rot,[0,-.06,.075]),o2=mv(l.rot,[0,-.34,.062]);
+    pushCap(add(l.pos,o1),add(l.pos,o2),.024,.021,COL.red);
+    pushCap(sh.pos,ft.pos,.070,.048,COL.mid);
+    const s1=mv(sh.rot,[0,-.08,.056]),s2=mv(sh.rot,[0,-.30,.042]);
+    pushCap(add(sh.pos,s1),add(sh.pos,s2),.018,.016,COL.red);
+    const heel=add(ft.pos,mv(ft.rot,[0,-.045,-.04])),toe=add(ft.pos,mv(ft.rot,[0,-.06,.15]));
+    pushCap(heel,toe,.058,.046,COL.dark);
+  }
+}
+function drawHelm(P){
+  const {hd,hc}=P;const r=.099;
+  // visor band (front)
+  const stripes=[];
+  const pts=[];
+  for(let a=-70;a<=70;a+=10){const q=add(hc,mv(hd.rot,[Math.sin(a*D)*r*1.0,.004,Math.cos(a*D)*r*1.0]));pts.push(q);}
+  drawArc(pts,hc,COL.black,Math.max(3,0.060*FOC/proj(hc)[2]*0.55),true);
+  // red stripe along sagittal plane
+  const sp=[];
+  for(let a=-30;a<=200;a+=8){const q=add(hc,mv(hd.rot,[0,Math.sin(a*D)*r*1.02,Math.cos(a*D)*r*1.02]));sp.push(q);}
+  drawArc(sp,hc,COL.red,Math.max(2,0.022*FOC/proj(hc)[2]),false);
+}
+function drawArc(pts,c,col,w,gloss){
+  let open=false;cx.lineCap='round';cx.lineJoin='round';
+  cx.strokeStyle=gloss?'#0d0d10':shade(col,1);cx.lineWidth=w;
+  cx.beginPath();
+  for(const q of pts){
+    const n=nrm(sub(q,c));const vis=dot(n,nrm(sub(CP,q)))>.05;
+    const p=proj(q);
+    if(vis&&p){open?cx.lineTo(p[0],p[1]):cx.moveTo(p[0],p[1]);open=true;}
+    else{open=false;}
+  }
+  cx.stroke();
+  if(gloss){cx.strokeStyle='rgba(140,200,230,.28)';cx.lineWidth=Math.max(1,w*.18);cx.beginPath();open=false;
+    for(const q of pts){const n=nrm(sub(q,c));const vis=dot(n,nrm(sub(CP,q)))>.05;const p=proj(add(q,[0,.012,0]));
+      if(vis&&p){open?cx.lineTo(p[0],p[1]):cx.moveTo(p[0],p[1]);open=true;}else open=false;}cx.stroke();}
+}
+
+function buildGun(W,pose){
+  if(!S.gunOn||!pose.fx.gunVis)return;
+  const gf=W.gun;
+  const ax=[gf.s,gf.f,gf.u];
+  const P=(gx,gy,gz)=>gunToWorld(gf,[gx,gy,gz]);
+  const slide=pose.fx.slide*.032;
+  // slide
+  pushBox(P(0,.075-slide*0+ -slide*0.0+(-slide)*0.0+0,.034),ax,[.0145,.100,.0185],COL.gold,{});
+  // frame
+  pushBox(P(0,.060,.004),ax,[.012,.085,.012],COL.dark,{});
+  // barrel tip
+  pushBox(P(0,.182-slide*0,.034),ax,[.007,.016,.007],COL.black,{});
+  // grip (slightly slanted by shifting along gy as z goes down)
+  pushBox(P(0,-.018,-.050),ax,[.0135,.028,.060],COL.dark,{});
+  // trigger guard
+  pushBox(P(0,.042,-.012),ax,[.004,.018,.010],COL.dark,{});
+  // magazine bottom (visible only if inserted)
+  if(pose.fx.gunMag>.5)pushBox(P(0,-.020,-.118),ax,[.012,.027,.014],COL.black,{});
+  // muzzle flash
+  if(pose.fx.flash>.5){
+    const tip=P(0,.20,.034);const p=proj(tip);
+    if(p)prims.push({z:p[2]-.05,k:'flash',p,r:.075*p[3]});
+  }
+  // left-hand magazine
+  if(pose.fx.handMag>.5){
+    const lh=W.handL;const c=add(lh.pos,mv(lh.rot,[0,-.05,.0]));
+    pushBox(c,[lh.rot.slice(0,3).length?[1,0,0]:[1,0,0],gf.f,gf.u],[.011,.026,.045],COL.black,{});
+  }
+}
+function drawFlash(P){
+  const {p,r}=P;
+  const g=cx.createRadialGradient(p[0],p[1],0,p[0],p[1],r);
+  g.addColorStop(0,'rgba(255,250,200,.95)');g.addColorStop(.35,'rgba(255,190,70,.85)');g.addColorStop(1,'rgba(255,120,20,0)');
+  cx.fillStyle=g;cx.beginPath();
+  for(let i=0;i<10;i++){const a=i*Math.PI/5,rr=(i%2?.5:1)*r;cx.lineTo(p[0]+Math.cos(a)*rr,p[1]+Math.sin(a)*rr);}cx.closePath();cx.fill();
+}
+function buildParticles(){
+  for(const p of parts){
+    if(p.type==='shell'){
+      const a=[Math.cos(p.rot),0,Math.sin(p.rot)],b=[0,1,0],c=[-Math.sin(p.rot),0,Math.cos(p.rot)];
+      pushBox(p.p,[a,b,c],[.004,.0095,.004],COL.gold,{});
+    }else{
+      pushBox(p.p,[p.gf.s,p.gf.f,p.gf.u],[.011,.027,.045],COL.black,{});
+    }
+  }
+}
+
+function drawGround(){
+  // sky / bg
+  const g=cx.createLinearGradient(0,0,0,VH);
+  g.addColorStop(0,'#27424f');g.addColorStop(.42,'#223b47');g.addColorStop(.43,'#1a3039');g.addColorStop(1,'#13242c');
+  cx.setTransform(DPR,0,0,DPR,0,0);
+  cx.fillStyle=g;cx.fillRect(0,0,VW,VH);
+  // grid
+  const step=1,R=26;
+  const cxg=Math.round(cam.tgt[0]),czg=Math.round(cam.tgt[2]);
+  cx.lineWidth=1;
+  for(let i=-R;i<=R;i++){
+    for(const dir of[0,1]){
+      const a=dir?[cxg-R,0,czg+i]:[cxg+i,0,czg-R];
+      const b=dir?[cxg+R,0,czg+i]:[cxg+i,0,czg+R];
+      // clip against near plane
+      let pa=sub(a,CP),pb=sub(b,CP);
+      let za=dot(pa,CF),zb=dot(pb,CF);
+      const NEAR=.3;
+      if(za<NEAR&&zb<NEAR)continue;
+      let A=a,B=b;
+      if(za<NEAR){const t=(NEAR-za)/(zb-za);A=lerpV(a,b,t);}
+      else if(zb<NEAR){const t=(NEAR-za)/(zb-za);B=lerpV(a,b,t);}
+      const qa=proj(A),qb=proj(B);if(!qa||!qb)continue;
+      const dist=Math.min(qa[2],qb[2]);
+      cx.strokeStyle=`rgba(120,175,195,${clamp(.22-dist*.006,.02,.22)})`;
+      cx.beginPath();cx.moveTo(qa[0],qa[1]);cx.lineTo(qb[0],qb[1]);cx.stroke();
+    }
+  }
+}
+function drawShadow(W){
+  const L=nrm([.22,1,.16]);
+  const gp=p=>{const t=p[1]/L[1];return [p[0]-L[0]*t,0.002,p[2]-L[2]*t];};
+  const P=n=>W[n].pos;
+  const groups=[
+    {w:.24,segs:[[P('hips'),P('chest')]]},
+    {w:.17,segs:[[P('chest'),add(P('head'),[0,.12,0])]]},
+    {w:.10,segs:[]}
+  ];
+  for(const s of['L','R']){
+    groups[2].segs.push([P('leg'+s),P('shin'+s)],[P('shin'+s),P('foot'+s)],[P('arm'+s),P('fore'+s)],[P('fore'+s),P('hand'+s)]);
+  }
+  cx.save();cx.globalAlpha=.34;cx.strokeStyle='#000';cx.lineCap='round';
+  for(const g of groups){
+    const a0=proj(gp(g.segs[0][0]));if(!a0)continue;
+    cx.lineWidth=g.w*a0[3]*.9;
+    cx.beginPath();
+    for(const sg of g.segs){const a=proj(gp(sg[0])),b=proj(gp(sg[1]));if(a&&b){cx.moveTo(a[0],a[1]);cx.lineTo(b[0],b[1]);}}
+    cx.stroke();
+  }
+  cx.restore();
+}
+function drawSkeleton(W){
+  cx.lineWidth=2;cx.strokeStyle='#ffd25a';cx.fillStyle='#fff';
+  const chain=[['hips','spine'],['spine','chest'],['chest','neck'],['neck','head'],['chest','armL'],['armL','foreL'],['foreL','handL'],['chest','armR'],['armR','foreR'],['foreR','handR'],['hips','legL'],['legL','shinL'],['shinL','footL'],['hips','legR'],['legR','shinR'],['shinR','footR']];
+  for(const c of chain){const a=proj(W[c[0]].pos),b=proj(W[c[1]].pos);if(a&&b){cx.beginPath();cx.moveTo(a[0],a[1]);cx.lineTo(b[0],b[1]);cx.stroke();}}
+  for(const b of BONES){const q=proj(W[b].pos);if(q){cx.beginPath();cx.arc(q[0],q[1],3,0,7);cx.fill();}}
+}
+function render(pose){
+  // world placement : pose ko world yaw/pos de do
+  const wp=clonePose(pose);
+  wp.root[3]+=S.yaw/D;
+  const c=Math.cos(S.yaw),s=Math.sin(S.yaw);
+  // pose.root x/z local -> world
+  const lx=pose.root[0],lz=pose.root[2];
+  wp.root[0]=S.pos[0]+lx*c+lz*s;
+  wp.root[2]=S.pos[1]-lx*s+lz*c;
+  const W=computeSkeleton(wp);
+  lastW=W;
+  // camera
+  const cc=CLIPS[S.clip];
+  const tgt=[W.hips.pos[0],.92,W.hips.pos[2]];
+  cam.tgt=lerpV(cam.tgt,tgt,S.move?.12:1);
+  camSetup();
+  drawGround();
+  drawShadow(W);
+  prims=[];
+  buildBody(W,wp);buildGun(W,wp);buildParticles();
+  prims.sort((a,b)=>b.z-a.z);
+  for(const p of prims){
+    if(p.k==='cap')drawCap(p);
+    else if(p.k==='fr')drawFrustum(p);
+    else if(p.k==='disc')drawDisc(p);
+    else if(p.k==='flash')drawFlash(p);
+    else if(p.k==='helm')drawHelm(p);
+  }
+  if(S.skel)drawSkeleton(W);
+}
+
+/* ========================= PART 6 : EXPORT ========================= */
+function bake(id,fps){
+  fps=fps||30;const c=CLIPS[id];const n=Math.max(2,Math.round(c.dur*fps)+1);
+  const frames=[];
+  for(let i=0;i<n;i++){
+    const t=Math.min(c.dur,i/fps);
+    const p=c.fn(t);
+    const W=computeSkeleton(p);
+    const q={};for(const b of BONES)q[MIXAMO[b]]=m2q(b==='hips'?mm(Ry(p.root[3]*D),W.hips.loc):W[b].loc).map(v=>+v.toFixed(5));
+    frames.push({t:+t.toFixed(4),hipsPos:[+W.hips.pos[0].toFixed(4),+W.hips.pos[1].toFixed(4),+W.hips.pos[2].toFixed(4)],
+      q,fx:{slide:+p.fx.slide.toFixed(3),flash:p.fx.flash>.5?1:0,gunMag:p.fx.gunMag>.5?1:0,handMag:p.fx.handMag>.5?1:0}});
+  }
+  return {name:id,label:c.label,duration:c.dur,loop:c.loop,fps,moveSpeed:c.v||0,
+    convention:'quaternions [x,y,z,w] are LOCAL rotations relative to the rest pose (arms hang down, legs down, spine up, y-up, +z forward, +x = character left)',
+    events:c.events.map(e=>({t:e[0],type:e[1]})),frames};
+}
+function skeletonDef(){
+  const o={};for(const b of BONES)o[MIXAMO[b]]={parent:DEF[b].p?MIXAMO[DEF[b].p]:null,offset:DEF[b].o};
+  return o;
+}
+window.PistolAnim={
+  BONES,DEF,CLIPS,SHOW,bake,skeletonDef,computeSkeleton,
+  sample:(id,t)=>CLIPS[id].fn(t),
+  /* Apna game engine: har frame sample() se pose lo, computeSkeleton() se world joints,
+     ya bake(id) se JSON export karke apne bones pe quaternion lagao (Mixamo naming). */
+  state:S
+};
+
+/* ============================ PART 7 : UI ============================ */
+const chips=document.getElementById('chips');
+function chip(id,label,cls){const d=document.createElement('div');d.className='chip '+(cls||'');d.dataset.id=id;d.textContent=label;chips.appendChild(d);
+  d.onclick=()=>{if(id==='_show'){startShowcase();}else{S.showcase=false;S.pos=S.move?S.pos:[0,0];setClip(id);S.playing=true;bPlay.textContent='⏸ Pause';}};}
+chip('_show','▶ Full Showcase (video order)','sc');
+for(const id in CLIPS)chip(id,CLIPS[id].label);
+const bPlay=document.getElementById('bPlay'),bMove=document.getElementById('bMove'),bCam=document.getElementById('bCam'),bSkel=document.getElementById('bSkel'),bGun=document.getElementById('bGun'),bExp=document.getElementById('bExp');
+bPlay.onclick=()=>{S.playing=!S.playing;bPlay.textContent=S.playing?'⏸ Pause':'▶ Play';};
+bMove.onclick=()=>{S.move=!S.move;bMove.textContent='Move: '+(S.move?'ON':'OFF');bMove.classList.toggle('on',S.move);if(!S.move){S.pos=[0,0];S.yaw=0;}};
+bCam.onclick=()=>{cam.auto=!cam.auto;bCam.textContent='Camera: '+(cam.auto?'Auto':'Manual');bCam.classList.toggle('on',cam.auto);};
+bSkel.onclick=()=>{S.skel=!S.skel;bSkel.classList.toggle('on',S.skel);};
+bGun.onclick=()=>{S.gunOn=!S.gunOn;bGun.classList.toggle('on',S.gunOn);};
+bExp.onclick=()=>{
+  const id=S.clip;const data={skeleton:skeletonDef(),clip:bake(id,30)};
+  const blob=new Blob([JSON.stringify(data)],{type:'application/json'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='pistol_'+id+'.json';document.body.appendChild(a);a.click();a.remove();
+};
+const spd=document.getElementById('spd'),spdv=document.getElementById('spdv'),tl=document.getElementById('tl'),tinfo=document.getElementById('tinfo');
+spd.oninput=()=>{S.speed=spd.value/100;spdv.textContent=S.speed.toFixed(2)+'x';};
+let scrub=false;
+tl.addEventListener('input',()=>{scrub=true;S.playing=false;bPlay.textContent='▶ Play';S.t=tl.value/1000*CLIPS[S.clip].dur;});
+tl.addEventListener('change',()=>{scrub=false;});
+// camera input
+let drag=null,pinch=null;
+cv.addEventListener('pointerdown',e=>{cv.setPointerCapture(e.pointerId);drag={x:e.clientX,y:e.clientY,pid:e.pointerId,m:new Map()};});
+const ptrs=new Map();
+cv.addEventListener('pointerdown',e=>ptrs.set(e.pointerId,[e.clientX,e.clientY]));
+cv.addEventListener('pointermove',e=>{
+  if(ptrs.has(e.pointerId)){
+    const prev=ptrs.get(e.pointerId);
+    if(ptrs.size===2){
+      const o=[...ptrs.entries()].find(k=>k[0]!==e.pointerId)[1];
+      const d0=Math.hypot(prev[0]-o[0],prev[1]-o[1]),d1=Math.hypot(e.clientX-o[0],e.clientY-o[1]);
+      cam.dist=clamp(cam.dist*d0/Math.max(1,d1),1.2,14);
+    }else{
+      cam.yaw-=(e.clientX-prev[0])*.008;cam.pitch=clamp(cam.pitch+(e.clientY-prev[1])*.006,-.2,1.3);
+      cam.auto=false;bCam.textContent='Camera: Manual';bCam.classList.remove('on');
+    }
+    ptrs.set(e.pointerId,[e.clientX,e.clientY]);
+  }
+});
+const endp=e=>{ptrs.delete(e.pointerId);};
+cv.addEventListener('pointerup',endp);cv.addEventListener('pointercancel',endp);
+cv.addEventListener('wheel',e=>{e.preventDefault();cam.dist=clamp(cam.dist*(1+e.deltaY*.001),1.2,14);},{passive:false});
+
+/* ---- main loop ---- */
+let last=performance.now(),camT=0;
+function frame(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  update(dt);
+  if(cam.auto){camT+=dt;const c=CLIPS[S.clip];
+    // cinematic orbit (video jaisa) : dheere ghumna + zoom in/out
+    cam.yaw=.55+Math.sin(camT*.22)*.95;cam.dist=4.0+Math.sin(camT*.31+1)*1.0+(c.v>2?.8:0);cam.pitch=.13+.05*Math.sin(camT*.17);}
+  const pose=currentPose();
+  render(pose);
+  if(!scrub){tl.value=Math.round(S.t/CLIPS[S.clip].dur*1000);}
+  tinfo.textContent=S.clip+'  '+S.t.toFixed(2)+'s / '+CLIPS[S.clip].dur.toFixed(2)+'s';
+  requestAnimationFrame(frame);
+}
+startShowcase();
+requestAnimationFrame(frame);
+window.__dbg={S,cam,CLIPS,render,currentPose,update,setClip,computeSkeleton};
+})();
+</script>
+</body>
+</html>

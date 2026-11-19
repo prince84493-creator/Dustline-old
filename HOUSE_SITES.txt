@@ -1,0 +1,2 @@
+The real, current house sites are in tools/houses/sites.txt (written by tools/houses/make_houses.py together with houses.bin).
+The old list that stood here was from an early plan and no longer matches the game.
